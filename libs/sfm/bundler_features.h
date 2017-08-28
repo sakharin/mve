@@ -38,10 +38,17 @@ public:
         int max_image_size;
         /** Feature set options. */
         FeatureSet::Options feature_options;
+
+        std::string scene_path;
+        std::string feature_file;
+        std::string parameter_file;
     };
 
 public:
     explicit Features (Options const& options);
+
+    /* Load features from accidental motion sfm */
+    void load (mve::Scene::Ptr scene, ViewportList* viewports, int* num_features);
 
     /** Computes features for all images in the scene. */
     void compute (mve::Scene::Ptr scene, ViewportList* viewports);

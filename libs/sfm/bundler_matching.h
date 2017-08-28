@@ -91,6 +91,7 @@ public:
      */
     void init (ViewportList* viewports);
 
+    void fake_match (PairwiseMatching* pairwise_matching, int num_features);
     /**
      * Computes the pairwise matching between all pairs of views.
      * Computation requires both descriptor data and 2D feature positions

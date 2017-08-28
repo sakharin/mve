@@ -61,6 +61,11 @@ struct AppSettings
     int min_views_per_track = 3;
     bool cascade_hashing = false;
     bool verbose_ba = false;
+
+    bool load_accidental_motion_sfm = false;
+    std::string feature_file = "Features.yml";
+    std::string parameter_file = "EstimatedParameters.yml";
+    std::string pose_file = "CameraPoses.yml";
 };
 
 void
@@ -82,6 +87,40 @@ log_message (AppSettings const& conf, std::string const& message)
 
     out << timestr << "  " << message << std::endl;
     out.close();
+}
+
+void
+load_features (mve::Scene::Ptr scene, AppSettings const& conf,
+    sfm::bundler::ViewportList* viewports,
+    sfm::bundler::PairwiseMatching* pairwise_matching)
+{
+    /* Fake parameters */
+    sfm::bundler::Features::Options feature_opts;
+    feature_opts.image_embedding = conf.original_name;
+    feature_opts.max_image_size = conf.max_image_size;
+    feature_opts.feature_options.feature_types = sfm::FeatureSet::FEATURE_ALL;
+
+    feature_opts.scene_path = conf.scene_path;
+    feature_opts.feature_file = conf.feature_file;
+    feature_opts.parameter_file = conf.parameter_file;
+
+    /* Load features */
+    sfm::bundler::Features bundler_features(feature_opts);
+    int num_features;
+    bundler_features.load(scene, viewports, &num_features);
+
+    /* Fake matching (features are already matched) */
+    sfm::bundler::Matching::Options matching_opts;
+    matching_opts.ransac_opts.verbose_output = false;
+    matching_opts.use_lowres_matching = conf.lowres_matching;
+    matching_opts.match_num_previous_frames = conf.video_matching;
+    matching_opts.matcher_type = conf.cascade_hashing
+        ? sfm::bundler::Matching::MATCHER_CASCADE_HASHING
+        : sfm::bundler::Matching::MATCHER_EXHAUSTIVE;
+
+    sfm::bundler::Matching bundler_matching(matching_opts);
+    bundler_matching.init(viewports);
+    bundler_matching.fake_match(pairwise_matching, num_features);
 }
 
 void
@@ -173,7 +212,15 @@ sfm_reconstruct (AppSettings const& conf)
         = util::fs::join_path(scene->get_path(), conf.prebundle_file);
     sfm::bundler::ViewportList viewports;
     sfm::bundler::PairwiseMatching pairwise_matching;
-    if (!util::fs::file_exists(prebundle_path.c_str()))
+    if (conf.load_accidental_motion_sfm)
+    {
+        log_message(conf, "Loading features.");
+        load_features(scene, conf, &viewports, &pairwise_matching);
+
+        std::cout << "Saving pre-bundle to file..." << std::endl;
+        sfm::bundler::save_prebundle_to_file(viewports, pairwise_matching, prebundle_path);
+    }
+    else if (!util::fs::file_exists(prebundle_path.c_str()))
     {
         log_message(conf, "Starting feature matching.");
         util::system::rand_seed(RAND_SEED_MATCHING);
@@ -208,32 +255,92 @@ sfm_reconstruct (AppSettings const& conf)
         std::exit(EXIT_FAILURE);
     }
 
-    /*
-     * Obtain camera intrinsics from the views or guess them from EXIF.
-     * If neither is available, fall back to a default.
-     *
-     * FIXME: Once width and height in the viewport is gone, this fully
-     * initializes the viewports. Thus viewport info does not need to be
-     * saved in the prebundle.sfm, and the file becomes matching.sfm.
-     * Obtaining EXIF guesses can be moved out of the feature module to here.
-     * The following code can become its own module "bundler_intrinsics".
-     */
+    if (conf.load_accidental_motion_sfm)
     {
-        sfm::bundler::Intrinsics::Options intrinsics_opts;
-        if (conf.intrinsics_from_views)
-        {
-            intrinsics_opts.intrinsics_source
-                = sfm::bundler::Intrinsics::FROM_VIEWS;
-        }
-        std::cout << "Initializing camera intrinsics..." << std::endl;
-        sfm::bundler::Intrinsics intrinsics(intrinsics_opts);
-        intrinsics.compute(scene, &viewports);
-    }
+        /* Load bundle adjustment parameters from file. */
+        cv::FileStorage ba_fs(conf.scene_path + "/" + conf.parameter_file, cv::FileStorage::READ);
+        if (!ba_fs.isOpened())
+          throw std::invalid_argument("Cannot open parameter file");
 
-    /* Start incremental SfM. */
-    log_message(conf, "Starting incremental SfM.");
-    util::WallTimer timer;
-    util::system::rand_seed(RAND_SEED_SFM);
+        log_message(conf, "Loading parameters.");
+        float f;
+        double cx;
+        double cy;
+        ba_fs["f"] >> f;
+        ba_fs["cx"] >> cx;
+        ba_fs["cy"] >> cy;
+        ba_fs.release();
+        // Principle point will be calculated later
+        cx = 0;
+        cy = 0;
+
+        /* Set focal length for each image. */
+        mve::Scene::ViewList const& views = scene->get_views();
+        for (std::size_t i = 0; i < views.size(); ++i)
+        {
+            viewports[i].focal_length = f;
+        }
+
+        /* Load poses from file. */
+        cv::FileStorage poses_fs(conf.scene_path + "/" + conf.pose_file, cv::FileStorage::READ);
+        if (!poses_fs.isOpened())
+            throw std::invalid_argument("Cannot open pose file");
+
+        log_message(conf, "Loading poses.");
+        cv::Mat R;
+        poses_fs["R"] >> R;
+        poses_fs.release();
+
+#pragma omp parallel for schedule(dynamic,1)
+        for (std::size_t i = 0; i < views.size(); ++i)
+        {
+            viewports[i].pose.set_k_matrix(f, cx, cy);
+
+            int idx = 4 * i;
+            viewports[i].pose.R[0] = R.at<double>(0, idx);
+            viewports[i].pose.R[1] = R.at<double>(0, idx + 1);
+            viewports[i].pose.R[2] = R.at<double>(0, idx + 2);
+            viewports[i].pose.R[3] = R.at<double>(1, idx);
+            viewports[i].pose.R[4] = R.at<double>(1, idx + 1);
+            viewports[i].pose.R[5] = R.at<double>(1, idx + 2);
+            viewports[i].pose.R[6] = R.at<double>(2, idx);
+            viewports[i].pose.R[7] = R.at<double>(2, idx + 1);
+            viewports[i].pose.R[8] = R.at<double>(2, idx + 2);
+
+            viewports[i].pose.t[0] = R.at<double>(0, idx + 3);
+            viewports[i].pose.t[1] = R.at<double>(1, idx + 3);
+            viewports[i].pose.t[2] = R.at<double>(2, idx + 3);
+        }
+    }
+    else
+    {
+        /*
+         * Obtain camera intrinsics from the views or guess them from EXIF.
+         * If neither is available, fall back to a default.
+         *
+         * FIXME: Once width and height in the viewport is gone, this fully
+         * initializes the viewports. Thus viewport info does not need to be
+         * saved in the prebundle.sfm, and the file becomes matching.sfm.
+         * Obtaining EXIF guesses can be moved out of the feature module to here.
+         * The following code can become its own module "bundler_intrinsics".
+         */
+        {
+            sfm::bundler::Intrinsics::Options intrinsics_opts;
+            if (conf.intrinsics_from_views)
+            {
+                intrinsics_opts.intrinsics_source
+                    = sfm::bundler::Intrinsics::FROM_VIEWS;
+            }
+            std::cout << "Initializing camera intrinsics..." << std::endl;
+            sfm::bundler::Intrinsics intrinsics(intrinsics_opts);
+            intrinsics.compute(scene, &viewports);
+        }
+
+        /* Start incremental SfM. */
+        log_message(conf, "Starting incremental SfM.");
+        util::WallTimer timer;
+        util::system::rand_seed(RAND_SEED_SFM);
+    }
 
     /* Compute connected feature components, i.e. feature tracks. */
     sfm::bundler::TrackList tracks;
@@ -256,39 +363,42 @@ sfm_reconstruct (AppSettings const& conf)
     /* Search for a good initial pair, or use the user-specified one. */
     sfm::bundler::InitialPair::Result init_pair_result;
     sfm::bundler::InitialPair::Options init_pair_opts;
-    if (conf.initial_pair_1 < 0 || conf.initial_pair_2 < 0)
+    if (!conf.load_accidental_motion_sfm)
     {
-        //init_pair_opts.homography_opts.max_iterations = 1000;
-        //init_pair_opts.homography_opts.threshold = 0.005f;
-        init_pair_opts.homography_opts.verbose_output = false;
-        init_pair_opts.max_homography_inliers = 0.8f;
-        init_pair_opts.verbose_output = true;
+        if (conf.initial_pair_1 < 0 || conf.initial_pair_2 < 0)
+        {
+            //init_pair_opts.homography_opts.max_iterations = 1000;
+            //init_pair_opts.homography_opts.threshold = 0.005f;
+            init_pair_opts.homography_opts.verbose_output = false;
+            init_pair_opts.max_homography_inliers = 0.8f;
+            init_pair_opts.verbose_output = true;
 
-        sfm::bundler::InitialPair init_pair(init_pair_opts);
-        init_pair.initialize(viewports, tracks);
-        init_pair.compute_pair(&init_pair_result);
-    }
-    else
-    {
-        std::cout << "Reconstructing initial pair..." << std::endl;
-        sfm::bundler::InitialPair init_pair(init_pair_opts);
-        init_pair.initialize(viewports, tracks);
-        init_pair.compute_pair(conf.initial_pair_1, conf.initial_pair_2,
-            &init_pair_result);
-    }
+            sfm::bundler::InitialPair init_pair(init_pair_opts);
+            init_pair.initialize(viewports, tracks);
+            init_pair.compute_pair(&init_pair_result);
+        }
+        else
+        {
+            std::cout << "Reconstructing initial pair..." << std::endl;
+            sfm::bundler::InitialPair init_pair(init_pair_opts);
+            init_pair.initialize(viewports, tracks);
+            init_pair.compute_pair(conf.initial_pair_1, conf.initial_pair_2,
+                &init_pair_result);
+        }
 
-    if (init_pair_result.view_1_id < 0 || init_pair_result.view_2_id < 0
-        || init_pair_result.view_1_id >= static_cast<int>(viewports.size())
-        || init_pair_result.view_2_id >= static_cast<int>(viewports.size()))
-    {
-        std::cerr << "Error finding initial pair, exiting!" << std::endl;
-        std::cerr << "Try manually specifying an initial pair." << std::endl;
-        std::exit(EXIT_FAILURE);
-    }
+        if (init_pair_result.view_1_id < 0 || init_pair_result.view_2_id < 0
+            || init_pair_result.view_1_id >= static_cast<int>(viewports.size())
+            || init_pair_result.view_2_id >= static_cast<int>(viewports.size()))
+        {
+            std::cerr << "Error finding initial pair, exiting!" << std::endl;
+            std::cerr << "Try manually specifying an initial pair." << std::endl;
+            std::exit(EXIT_FAILURE);
+        }
 
-    std::cout << "Using views " << init_pair_result.view_1_id
-        << " and " << init_pair_result.view_2_id
-        << " as initial pair." << std::endl;
+        std::cout << "Using views " << init_pair_result.view_1_id
+            << " and " << init_pair_result.view_2_id
+            << " as initial pair." << std::endl;
+    }
 
     /* Incrementally compute full bundle. */
     sfm::bundler::Incremental::Options incremental_opts;
@@ -303,51 +413,113 @@ sfm_reconstruct (AppSettings const& conf)
     incremental_opts.verbose_output = true;
     incremental_opts.verbose_ba = conf.verbose_ba;
 
-    /* Initialize viewports with initial pair. */
-    viewports[init_pair_result.view_1_id].pose = init_pair_result.view_1_pose;
-    viewports[init_pair_result.view_2_id].pose = init_pair_result.view_2_pose;
+    if (!conf.load_accidental_motion_sfm)
+    {
+        /* Initialize viewports with initial pair. */
+        viewports[init_pair_result.view_1_id].pose = init_pair_result.view_1_pose;
+        viewports[init_pair_result.view_2_id].pose = init_pair_result.view_2_pose;
+    }
 
     /* Initialize the incremental bundler and reconstruct first tracks. */
     sfm::bundler::Incremental incremental(incremental_opts);
     incremental.initialize(&viewports, &tracks, &survey);
-    incremental.triangulate_new_tracks(2);
-    incremental.invalidate_large_error_tracks();
-
-    /* Run bundle adjustment. */
-    std::cout << "Running full bundle adjustment..." << std::endl;
-    incremental.bundle_adjustment_full();
-
-    /* Reconstruct remaining views. */
-    int num_cameras_reconstructed = 2;
-    int full_ba_num_skipped = 0;
-    while (true)
+    if (!conf.load_accidental_motion_sfm)
     {
-        /* Find suitable next views for reconstruction. */
-        std::vector<int> next_views;
-        incremental.find_next_views(&next_views);
+        incremental.triangulate_new_tracks(2);
+        incremental.invalidate_large_error_tracks();
+    }
 
-        /* Reconstruct the next view. */
-        int next_view_id = -1;
-        for (std::size_t i = 0; i < next_views.size(); ++i)
-        {
-            std::cout << std::endl;
-            std::cout << "Adding next view ID " << next_views[i]
-                << " (" << (num_cameras_reconstructed + 1) << " of "
-                << viewports.size() << ")..." << std::endl;
-            if (incremental.reconstruct_next_view(next_views[i]))
-            {
-                next_view_id = next_views[i];
-                break;
-            }
+    if (conf.load_accidental_motion_sfm)
+    {
+        /* Load bundle adjustment parameters from file. */
+        cv::FileStorage ba_fs(conf.scene_path + "/" + conf.parameter_file, cv::FileStorage::READ);
+        if (!ba_fs.isOpened())
+          throw std::invalid_argument("Cannot open parameter file");
+
+        log_message(conf, "Loading parameters.");
+        cv::Mat inv_depths;
+        ba_fs["inv_depths"] >> inv_depths;
+        ba_fs.release();
+
+        /* Get 3D pos of features. */
+        double fx = viewports[0].pose.K[0];
+        double fy = viewports[0].pose.K[4];
+        double cx = viewports[0].pose.K[2];
+        double cy = viewports[0].pose.K[5];
+#pragma omp parallel for schedule(dynamic,1)
+        for (std::size_t i = 0; i < viewports[0].features.positions.size(); i++) {
+            double inv_depth = inv_depths.at<double>(i);
+            double depth = 1. / inv_depth;
+
+            double u = viewports[0].features.positions[i][0];
+            double v = viewports[0].features.positions[i][1];
+            tracks[i].pos[0] = (u - cx) * depth / fx;
+            tracks[i].pos[1] = (v - cy) * depth / fy;
+            tracks[i].pos[2] = depth;
         }
+    }
+    else
+    {
+        /* Run bundle adjustment. */
+        std::cout << "Running full bundle adjustment..." << std::endl;
+        incremental.bundle_adjustment_full();
 
-        if (next_view_id < 0)
+        /* Reconstruct remaining views. */
+        int num_cameras_reconstructed = 2;
+        int full_ba_num_skipped = 0;
+        while (true)
         {
-            if (full_ba_num_skipped == 0)
+            /* Find suitable next views for reconstruction. */
+            std::vector<int> next_views;
+            incremental.find_next_views(&next_views);
+
+            /* Reconstruct the next view. */
+            int next_view_id = -1;
+            for (std::size_t i = 0; i < next_views.size(); ++i)
             {
-                std::cout << "No valid next view." << std::endl;
-                std::cout << "SfM reconstruction finished." << std::endl;
-                break;
+                std::cout << std::endl;
+                std::cout << "Adding next view ID " << next_views[i]
+                    << " (" << (num_cameras_reconstructed + 1) << " of "
+                    << viewports.size() << ")..." << std::endl;
+                if (incremental.reconstruct_next_view(next_views[i]))
+                {
+                    next_view_id = next_views[i];
+                    break;
+                }
+            }
+
+            if (next_view_id < 0)
+            {
+                if (full_ba_num_skipped == 0)
+                {
+                    std::cout << "No valid next view." << std::endl;
+                    std::cout << "SfM reconstruction finished." << std::endl;
+                    break;
+                }
+                else
+                {
+                    incremental.triangulate_new_tracks(conf.min_views_per_track);
+                    std::cout << "Running full bundle adjustment..." << std::endl;
+                    incremental.bundle_adjustment_full();
+                    incremental.invalidate_large_error_tracks();
+                    full_ba_num_skipped = 0;
+                    continue;
+                }
+            }
+
+            /* Run single-camera bundle adjustment. */
+            std::cout << "Running single camera bundle adjustment..." << std::endl;
+            incremental.bundle_adjustment_single_cam(next_view_id);
+            num_cameras_reconstructed += 1;
+
+            /* Run full bundle adjustment only after a couple of views. */
+            int const full_ba_skip_views = conf.always_full_ba ? 0
+                : std::min(100, num_cameras_reconstructed / 10);
+            if (full_ba_num_skipped < full_ba_skip_views)
+            {
+                std::cout << "Skipping full bundle adjustment (skipping "
+                    << full_ba_skip_views << " views)." << std::endl;
+                full_ba_num_skipped += 1;
             }
             else
             {
@@ -356,38 +528,14 @@ sfm_reconstruct (AppSettings const& conf)
                 incremental.bundle_adjustment_full();
                 incremental.invalidate_large_error_tracks();
                 full_ba_num_skipped = 0;
-                continue;
             }
         }
 
-        /* Run single-camera bundle adjustment. */
-        std::cout << "Running single camera bundle adjustment..." << std::endl;
-        incremental.bundle_adjustment_single_cam(next_view_id);
-        num_cameras_reconstructed += 1;
-
-        /* Run full bundle adjustment only after a couple of views. */
-        int const full_ba_skip_views = conf.always_full_ba ? 0
-            : std::min(100, num_cameras_reconstructed / 10);
-        if (full_ba_num_skipped < full_ba_skip_views)
-        {
-            std::cout << "Skipping full bundle adjustment (skipping "
-                << full_ba_skip_views << " views)." << std::endl;
-            full_ba_num_skipped += 1;
-        }
-        else
-        {
-            incremental.triangulate_new_tracks(conf.min_views_per_track);
-            std::cout << "Running full bundle adjustment..." << std::endl;
-            incremental.bundle_adjustment_full();
-            incremental.invalidate_large_error_tracks();
-            full_ba_num_skipped = 0;
-        }
+        std::cout << "SfM reconstruction took " << timer.get_elapsed()
+            << " ms." << std::endl;
+        log_message(conf, "SfM reconstruction took "
+            + util::string::get(timer.get_elapsed()) + "ms.");
     }
-
-    std::cout << "SfM reconstruction took " << timer.get_elapsed()
-        << " ms." << std::endl;
-    log_message(conf, "SfM reconstruction took "
-        + util::string::get(timer.get_elapsed()) + "ms.");
 
     /* Normalize scene if requested. */
     if (conf.normalize_scene)
@@ -507,6 +655,7 @@ main (int argc, char** argv)
     args.add_option('\0', "initial-pair", true, "Manually specify initial pair IDs [-1,-1]");
     args.add_option('\0', "cascade-hashing", false, "Use cascade hashing for matching [false]");
     args.add_option('\0', "verbose-ba", false, "Print detailed BA information [false]");
+    args.add_option('\0', "load-accidental-motion-sfm", false, "Load reconstructed data from accidental motion sfm");
     args.parse(argc, argv);
 
     /* Setup defaults. */
@@ -571,6 +720,9 @@ main (int argc, char** argv)
             conf.cascade_hashing = true;
         else if (i->opt->lopt == "verbose-ba")
             conf.verbose_ba = true;
+        else if (i->opt->lopt == "load-accidental-motion-sfm") {
+            conf.load_accidental_motion_sfm = true;
+        }
         else
         {
             std::cerr << "Error: Unexpected option: "

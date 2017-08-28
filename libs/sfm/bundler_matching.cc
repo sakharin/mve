@@ -56,6 +56,45 @@ Matching::init (ViewportList* viewports)
 }
 
 void
+Matching::fake_match(PairwiseMatching* pairwise_matching, int num_features)
+{
+    if (this->viewports == nullptr)
+        throw std::runtime_error("Viewports must not be null");
+
+    std::size_t num_viewports = this->viewports->size();
+    std::size_t num_pairs = num_viewports * (num_viewports - 1) / 2;
+
+    if (this->progress != nullptr)
+    {
+        this->progress->num_total = num_pairs;
+        this->progress->num_done = 0;
+    }
+
+    for (std::size_t i = 0; i < num_pairs; ++i)
+    {
+        int const view_1_id = (int)(0.5 + std::sqrt(0.25 + 2.0 * i));
+        int const view_2_id = (int)i - view_1_id * (view_1_id - 1) / 2;
+
+        /* Match the views. */
+        CorrespondenceIndices matches;
+        matches.clear();
+        matches.reserve(num_features);
+        for (int i = 0; i < num_features; ++i)
+        {
+            matches.push_back(std::make_pair(i, i));
+        }
+
+        /* Successful two view matching. Add the pair. */
+        TwoViewMatching matching;
+        matching.view_1_id = view_1_id;
+        matching.view_2_id = view_2_id;
+        std::swap(matching.matches, matches);
+
+        pairwise_matching->push_back(matching);
+    }
+}
+
+void
 Matching::compute (PairwiseMatching* pairwise_matching)
 {
     if (this->viewports == nullptr)

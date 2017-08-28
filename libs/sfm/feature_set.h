@@ -17,6 +17,7 @@
 #include "sfm/sift.h"
 #include "sfm/surf.h"
 #include "sfm/defines.h"
+#include <opencv2/opencv.hpp>
 
 SFM_NAMESPACE_BEGIN
 
@@ -49,6 +50,8 @@ public:
     FeatureSet (void);
     explicit FeatureSet (Options const& options);
     void set_options (Options const& options);
+
+    void load_features (mve::ByteImage::Ptr image, int image_index, cv::Mat features);
 
     /** Computes the features specified in the options. */
     void compute_features (mve::ByteImage::Ptr image);

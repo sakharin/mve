@@ -25,6 +25,29 @@ namespace
 }  /* namespace */
 
 void
+FeatureSet::load_features (mve::ByteImage::Ptr image, int image_index, cv::Mat features)
+{
+    this->colors.clear();
+    this->positions.clear();
+    this->width = image->width();
+    this->height = image->height();
+
+    std::size_t offset = this->positions.size();
+    this->positions.resize(offset + features.cols);
+    this->colors.resize(offset + features.cols);
+
+    for (std::size_t i = 0; i < features.cols; ++i)
+    {
+        int index_offset = image_index * 2;
+        float x = features.at<float>(index_offset, i);
+        float y = features.at<float>(index_offset + 1, i);
+
+        this->positions[offset + i] = math::Vec2f(x, y);
+        image->linear_at(x, y, this->colors[offset + i].begin());
+    }
+}
+
+void
 FeatureSet::compute_features (mve::ByteImage::Ptr image)
 {
     this->colors.clear();

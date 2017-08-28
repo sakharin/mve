@@ -14,9 +14,65 @@
 #include "sfm/bundler_common.h"
 #include "sfm/extract_focal_length.h"
 #include "sfm/bundler_features.h"
+#include <opencv2/opencv.hpp>
 
 SFM_NAMESPACE_BEGIN
 SFM_BUNDLER_NAMESPACE_BEGIN
+
+void
+Features::load (mve::Scene::Ptr scene, ViewportList* viewports, int* num_features)
+{
+    if (scene == nullptr)
+        throw std::invalid_argument("Null scene given");
+    if (viewports == nullptr)
+        throw std::invalid_argument("No viewports given");
+
+    cv::FileStorage fs(this->opts.scene_path + "/" + this->opts.feature_file, cv::FileStorage::READ);
+    if (!fs.isOpened())
+        throw std::invalid_argument("Cannot open feature file");
+
+    cv::Mat features;
+    fs["features"] >> features;
+    fs.release();
+
+    *num_features = features.cols;
+
+    mve::Scene::ViewList const& views = scene->get_views();
+
+    /* Initialize viewports. */
+    viewports->clear();
+    viewports->resize(views.size());
+
+    /* Iterate the scene and compute features. */
+    for (std::size_t i = 0; i < views.size(); ++i)
+    {
+        if (views[i] == nullptr)
+            continue;
+
+        mve::View::Ptr view = views[i];
+        mve::ByteImage::Ptr image = view->get_byte_image
+            (this->opts.image_embedding);
+        if (image == nullptr)
+            continue;
+
+        /* Compute features for view. */
+        Viewport* viewport = &viewports->at(i);
+        viewport->features.set_options(this->opts.feature_options);
+        viewport->features.load_features(image, i, features);
+
+        /* Normalize image coordinates. */
+        float const fwidth = static_cast<float>(viewport->features.width);
+        float const fheight = static_cast<float>(viewport->features.height);
+        float const fnorm = std::max(fwidth, fheight);
+        for (std::size_t j = 0; j < viewport->features.positions.size(); ++j)
+        {
+            math::Vec2f& pos = viewport->features.positions[j];
+            // Do not normalize.
+            pos[0] = (pos[0] + 0.5f - fwidth / 2.0f) / fnorm;
+            pos[1] = (pos[1] + 0.5f - fheight / 2.0f) / fnorm;
+        }
+    }
+}
 
 void
 Features::compute (mve::Scene::Ptr scene, ViewportList* viewports)
