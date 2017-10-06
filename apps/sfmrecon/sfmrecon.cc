@@ -335,12 +335,12 @@ sfm_reconstruct (AppSettings const& conf)
             sfm::bundler::Intrinsics intrinsics(intrinsics_opts);
             intrinsics.compute(scene, &viewports);
         }
-
-        /* Start incremental SfM. */
-        log_message(conf, "Starting incremental SfM.");
-        util::WallTimer timer;
-        util::system::rand_seed(RAND_SEED_SFM);
     }
+
+    /* Start incremental SfM. */
+    log_message(conf, "Starting incremental SfM.");
+    util::WallTimer timer;
+    util::system::rand_seed(RAND_SEED_SFM);
 
     /* Compute connected feature components, i.e. feature tracks. */
     sfm::bundler::TrackList tracks;
