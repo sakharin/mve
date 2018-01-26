@@ -62,7 +62,7 @@ struct AppSettings
     bool cascade_hashing = false;
     bool verbose_ba = false;
 
-    bool load_accidental_motion_sfm = false;
+    bool load_asfm = false;
     std::string feature_file = "Features.yml";
     std::string parameter_file = "EstimatedParameters.yml";
     std::string pose_file = "CameraPoses.yml";
@@ -212,7 +212,7 @@ sfm_reconstruct (AppSettings const& conf)
         = util::fs::join_path(scene->get_path(), conf.prebundle_file);
     sfm::bundler::ViewportList viewports;
     sfm::bundler::PairwiseMatching pairwise_matching;
-    if (conf.load_accidental_motion_sfm)
+    if (conf.load_asfm)
     {
         log_message(conf, "Loading features.");
         load_features(scene, conf, &viewports, &pairwise_matching);
@@ -255,7 +255,7 @@ sfm_reconstruct (AppSettings const& conf)
         std::exit(EXIT_FAILURE);
     }
 
-    if (conf.load_accidental_motion_sfm)
+    if (conf.load_asfm)
     {
         /* Load bundle adjustment parameters from file. */
         cv::FileStorage ba_fs(conf.scene_path + "/" + conf.parameter_file, cv::FileStorage::READ);
@@ -363,7 +363,7 @@ sfm_reconstruct (AppSettings const& conf)
     /* Search for a good initial pair, or use the user-specified one. */
     sfm::bundler::InitialPair::Result init_pair_result;
     sfm::bundler::InitialPair::Options init_pair_opts;
-    if (!conf.load_accidental_motion_sfm)
+    if (!conf.load_asfm)
     {
         if (conf.initial_pair_1 < 0 || conf.initial_pair_2 < 0)
         {
@@ -413,7 +413,7 @@ sfm_reconstruct (AppSettings const& conf)
     incremental_opts.verbose_output = true;
     incremental_opts.verbose_ba = conf.verbose_ba;
 
-    if (!conf.load_accidental_motion_sfm)
+    if (!conf.load_asfm)
     {
         /* Initialize viewports with initial pair. */
         viewports[init_pair_result.view_1_id].pose = init_pair_result.view_1_pose;
@@ -423,13 +423,13 @@ sfm_reconstruct (AppSettings const& conf)
     /* Initialize the incremental bundler and reconstruct first tracks. */
     sfm::bundler::Incremental incremental(incremental_opts);
     incremental.initialize(&viewports, &tracks, &survey);
-    if (!conf.load_accidental_motion_sfm)
+    if (!conf.load_asfm)
     {
         incremental.triangulate_new_tracks(2);
         incremental.invalidate_large_error_tracks();
     }
 
-    if (conf.load_accidental_motion_sfm)
+    if (conf.load_asfm)
     {
         /* Load bundle adjustment parameters from file. */
         cv::FileStorage ba_fs(conf.scene_path + "/" + conf.parameter_file, cv::FileStorage::READ);
@@ -655,7 +655,7 @@ main (int argc, char** argv)
     args.add_option('\0', "initial-pair", true, "Manually specify initial pair IDs [-1,-1]");
     args.add_option('\0', "cascade-hashing", false, "Use cascade hashing for matching [false]");
     args.add_option('\0', "verbose-ba", false, "Print detailed BA information [false]");
-    args.add_option('\0', "load-accidental-motion-sfm", false, "Load reconstructed data from accidental motion sfm");
+    args.add_option('\0', "load-asfm", false, "Load reconstructed data from accidental motion sfm");
     args.parse(argc, argv);
 
     /* Setup defaults. */
@@ -720,8 +720,8 @@ main (int argc, char** argv)
             conf.cascade_hashing = true;
         else if (i->opt->lopt == "verbose-ba")
             conf.verbose_ba = true;
-        else if (i->opt->lopt == "load-accidental-motion-sfm") {
-            conf.load_accidental_motion_sfm = true;
+        else if (i->opt->lopt == "load-asfm") {
+            conf.load_asfm = true;
         }
         else
         {
